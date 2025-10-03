@@ -1,19 +1,22 @@
 from flask import Flask, request, jsonify
-from together import Together
+import google.generativeai as genai
 import os
 from dotenv import load_dotenv
 from flask_cors import CORS
 
 # Load environment variables
 load_dotenv()
-TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
-# Initialize Together client
-client = Together(api_key=TOGETHER_API_KEY)
+# Configure Gemini
+genai.configure(api_key=GEMINI_API_KEY)
+
+# Initialize Gemini model
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 # In-memory conversation storage
 # In a production environment, consider using a database
@@ -33,51 +36,47 @@ def chat():
         
         # Initialize conversation history if it doesn't exist
         if conversation_id not in conversation_history:
-            conversation_history[conversation_id] = [
-                {"role": "system", "content": """
-                You are Advocate.ai, a sophisticated legal assistant specialized in all aspects of law.
-                You provide accurate, nuanced responses to legal queries based on comprehensive knowledge of:
-                
-                - All legal codes, statutes, and regulations from major jurisdictions
-                - Case law and legal precedents across different courts
-                - Civil, criminal, corporate, constitutional, and administrative law
-                - Legal procedures, court protocols, and filing requirements
-                - Contract law and document analysis
-                
-                Guidelines for responses:
-                - Always provide balanced legal perspectives considering multiple interpretations
-                - Cite relevant sections of law, case precedents, and statutes when appropriate
-                - Explain complex legal concepts in clear, accessible language
-                - When appropriate, outline potential strategies or approaches a legal professional might consider
-                - Always clarify that you're providing legal information, not legal advice
-                - Acknowledge jurisdictional differences when relevant
-                
-                When uncertain, acknowledge limitations and suggest consulting with a qualified attorney for specific advice.
-                """}
-            ]
+            system_prompt = """
+            You are Advocate.ai, a sophisticated legal assistant specialized in all aspects of law.
+            You provide accurate, nuanced responses to legal queries based on comprehensive knowledge of:
+            
+            - All legal codes, statutes, and regulations from major jurisdictions
+            - Case law and legal precedents across different courts
+            - Civil, criminal, corporate, constitutional, and administrative law
+            - Legal procedures, court protocols, and filing requirements
+            - Contract law and document analysis
+            
+            Guidelines for responses:
+            - Always provide balanced legal perspectives considering multiple interpretations
+            - Cite relevant sections of law, case precedents, and statutes when appropriate
+            - Explain complex legal concepts in clear, accessible language
+            - When appropriate, outline potential strategies or approaches a legal professional might consider
+            - Always clarify that you're providing legal information, not legal advice
+            - Acknowledge jurisdictional differences when relevant
+            
+            When uncertain, acknowledge limitations and suggest consulting with a qualified attorney for specific advice.
+            """
+            
+            # Start a chat session with Gemini
+            chat = model.start_chat(history=[])
+            conversation_history[conversation_id] = {
+                "chat": chat,
+                "system_prompt": system_prompt
+            }
         
-        # Add user message to history
-        conversation_history[conversation_id].append({"role": "user", "content": user_query})
+        # Get the chat session
+        chat = conversation_history[conversation_id]["chat"]
+        system_prompt = conversation_history[conversation_id]["system_prompt"]
         
-        # Create message format for Together API with conversation history
-        messages = conversation_history[conversation_id].copy()
+        # Prepend system prompt to first message or send as context
+        if len(chat.history) == 0:
+            full_query = f"{system_prompt}\n\nUser: {user_query}"
+        else:
+            full_query = user_query
         
-        # Limit context window if needed (adjust max_tokens as needed for your model)
-        if len(messages) > 10:
-            # Keep system prompt and most recent messages
-            messages = [messages[0]] + messages[-9:]
-        
-        # Get response from Together API
-        response = client.chat.completions.create(
-            model="meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo-classifier",
-            messages=messages
-        )
-        
-        # Extract the content from the response
-        response_content = response.choices[0].message.content
-        
-        # Save assistant response to history
-        conversation_history[conversation_id].append({"role": "assistant", "content": response_content})
+        # Send message and get response
+        response = chat.send_message(full_query)
+        response_content = response.text
         
         print(f"LLM response: {response_content}")
         
@@ -97,10 +96,14 @@ def clear_history():
         data = request.get_json()
         conversation_id = data.get("conversationId", "default")
         
-        # Reset conversation to just the system prompt
+        # Reset conversation by creating a new chat session
         if conversation_id in conversation_history:
-            system_prompt = conversation_history[conversation_id][0]
-            conversation_history[conversation_id] = [system_prompt]
+            system_prompt = conversation_history[conversation_id]["system_prompt"]
+            chat = model.start_chat(history=[])
+            conversation_history[conversation_id] = {
+                "chat": chat,
+                "system_prompt": system_prompt
+            }
         
         return jsonify({"status": "success", "message": "Conversation history cleared"})
     except Exception as e:
